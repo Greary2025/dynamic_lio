@@ -1,5 +1,7 @@
 #include "lioOptimization.h"
 
+#include <cmath>
+
 cloudFrame::cloudFrame(std::vector<point3D> &point_frame_, state *p_state_)
 {
     point_frame.insert(point_frame.end(), point_frame_.begin(), point_frame_.end());
@@ -107,6 +109,10 @@ void lioOptimization::readParameters()
     nh.param<double>("imu_parameter/b_gyr_cov", para_double, 0.0001);  eskf_pro->setBiasGyrCov(para_double);
 
     nh.param<bool>("imu_parameter/time_diff_enable", time_diff_enable, false);
+    nh.param<double>("imu_parameter/time_diff", time_diff, 0.0);
+    nh.param<bool>("imu_parameter/add_gravity_from_orientation", imu_add_gravity_from_orientation, false);
+    nh.param<bool>("imu_parameter/estimate_gravity_from_imu", estimate_gravity_from_imu, true);
+    eskf_pro->setEstimateGravityFromImu(estimate_gravity_from_imu);
 
     // extrinsic parameter
     nh.param<bool>("extrinsic_parameter/extrinsic_enable", extrin_enable, true);
@@ -171,8 +177,14 @@ void lioOptimization::initialValue()
 
     G = vec3FromArray(v_G);
     G_norm = G.norm();
+    eskf_pro->setGravity(G);
     R_imu_lidar = mat33FromArray(v_extrin_R);
     t_imu_lidar = vec3FromArray(v_extrin_t);
+
+    if (!estimate_gravity_from_imu && !imu_add_gravity_from_orientation)
+    {
+        ROS_WARN("Gravity estimation from IMU is disabled, but gravity is not added back from orientation.");
+    }
 
     cloud_pro->setExtrinR(R_imu_lidar);
     cloud_pro->setExtrinT(t_imu_lidar);
@@ -318,7 +330,33 @@ void lioOptimization::imuHandler(const sensor_msgs::Imu::ConstPtr &msg)
 {
     sensor_msgs::Imu::Ptr msg_temp(new sensor_msgs::Imu(*msg));
 
-    if (abs(time_diff) > 0.1 && time_diff_enable)
+    if (imu_add_gravity_from_orientation)
+    {
+        const Eigen::Quaterniond q_world_imu(msg_temp->orientation.w,
+                                             msg_temp->orientation.x,
+                                             msg_temp->orientation.y,
+                                             msg_temp->orientation.z);
+
+        if (std::isfinite(q_world_imu.w()) &&
+            std::isfinite(q_world_imu.x()) &&
+            std::isfinite(q_world_imu.y()) &&
+            std::isfinite(q_world_imu.z()) &&
+            q_world_imu.norm() > 1e-6)
+        {
+            Eigen::Quaterniond q_world_imu_normalized = q_world_imu.normalized();
+            Eigen::Vector3d gravity_in_imu = q_world_imu_normalized.inverse() * G;
+
+            msg_temp->linear_acceleration.x += gravity_in_imu.x();
+            msg_temp->linear_acceleration.y += gravity_in_imu.y();
+            msg_temp->linear_acceleration.z += gravity_in_imu.z();
+        }
+        else
+        {
+            ROS_WARN_THROTTLE(5.0, "IMU gravity compensation is enabled, but orientation is invalid.");
+        }
+    }
+
+    if (time_diff_enable && std::abs(time_diff) > 1e-6)
     {
         msg_temp->header.stamp = ros::Time().fromSec(time_diff + msg->header.stamp.toSec());
     }

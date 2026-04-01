@@ -1,0 +1,100 @@
+<launch>
+  <arg name="bag_path" default="/mnt/d/rosbag/single/onlyone1.bag" />
+  <arg name="play_rate" default="1.0" />
+  <arg name="play_delay" default="2.0" />
+  <arg name="run_frontend" default="true" />
+  <arg name="run_backend" default="false" />
+  <arg name="use_monotonic_time" default="true" />
+  <arg name="use_bag_clock" default="false" />
+  <arg name="front_rviz" default="true" />
+  <arg name="pgo_rviz" default="true" />
+  <arg name="loop_closure_frequency" default="1.0" />
+  <arg name="lidar_input_topic" default="/gensui/lidar" />
+  <arg name="imu_input_topic" default="/gensui/imu" />
+  <arg name="lidar_monotonic_topic" default="/gensui/monotonic_lidar" />
+  <arg name="imu_monotonic_topic" default="/gensui/monotonic_imu" />
+  <arg name="output_path" default="/mnt/d/rosbag_evo/0331single/dynamic/gensui" />
+  <arg name="pgo_save_directory" default="/mnt/d/rosbag_evo/0331single/dynamic/gensui/" />
+  <arg name="result_save_directory" default="/mnt/d/rosbag_evo/0331single/dynamic/gensui" />
+
+  <param name="/use_sim_time" value="$(arg use_bag_clock)" />
+
+  <rosparam command="load" file="$(find sr_lio)/config/xianfeng_async_1014.yaml" />
+  <param name="debug_output" type="bool" value="0" />
+  <param name="output_path" type="string" value="$(arg output_path)" />
+
+  <group if="$(arg use_monotonic_time)">
+    <node pkg="sr_lio" type="monotonic_time_republisher.py" name="monotonic_time_republisher" output="screen">
+      <param name="lidar_in_topic" type="string" value="$(arg lidar_input_topic)" />
+      <param name="imu_in_topic" type="string" value="$(arg imu_input_topic)" />
+      <param name="lidar_out_topic" type="string" value="$(arg lidar_monotonic_topic)" />
+      <param name="imu_out_topic" type="string" value="$(arg imu_monotonic_topic)" />
+      <param name="min_step_sec" type="double" value="0.000001" />
+    </node>
+    <param name="common/lidar_topic" type="string" value="$(arg lidar_monotonic_topic)" />
+    <param name="common/imu_topic" type="string" value="$(arg imu_monotonic_topic)" />
+  </group>
+
+  <group unless="$(arg use_monotonic_time)">
+    <param name="common/lidar_topic" type="string" value="$(arg lidar_input_topic)" />
+    <param name="common/imu_topic" type="string" value="$(arg imu_input_topic)" />
+  </group>
+
+  <group if="$(arg run_frontend)">
+    <node pkg="sr_lio" type="lio_optimization" name="lio_optimization" output="screen" />
+  </group>
+
+  <group if="$(eval arg('run_frontend') and arg('front_rviz'))">
+    <node pkg="rviz" type="rviz" name="rviz_sr_lio" args="-d $(find sr_lio)/rviz_cfg/visualization.rviz" output="screen" />
+  </group>
+
+  <group if="$(arg run_backend)">
+    <param name="scan_line" type="int" value="16" />
+    <param name="minimum_range" type="double" value="0.5" />
+    <param name="mapping_line_resolution" type="double" value="0.4" />
+    <param name="mapping_plane_resolution" type="double" value="0.8" />
+    <param name="mapviz_filter_size" type="double" value="0.05" />
+    <param name="keyframe_meter_gap" type="double" value="0.5" />
+    <param name="sc_dist_thres" type="double" value="0.3" />
+    <param name="sc_max_radius" type="double" value="80.0" />
+    <param name="loop_closure_frequency" type="double" value="$(arg loop_closure_frequency)" />
+    <param name="lidar_type" type="string" value="VLP16" />
+    <param name="save_directory" type="string" value="$(arg pgo_save_directory)" />
+    <param name="output_path" type="string" value="$(arg output_path)" />
+
+    <remap from="/aft_mapped_to_init" to="/Odometry_after_opt" />
+    <remap from="/velodyne_cloud_registered_local" to="/loop_map" />
+    <remap from="/cloud_for_scancontext" to="/cloud_registered_lidar" />
+
+    <node pkg="aloam_velodyne" type="alaserPGO" name="alaserPGO" output="screen" />
+  </group>
+
+  <group if="$(eval arg('run_backend') and arg('pgo_rviz'))">
+    <node pkg="rviz" type="rviz" name="rviz_scpgo" args="-d $(find aloam_velodyne)/rviz_cfg/aloam_velodyne.rviz" output="screen" />
+  </group>
+
+  <node pkg="sr_lio" type="dynamic_result_saver" name="dynamic_result_saver" output="screen">
+    <param name="output_dir" type="string" value="$(arg result_save_directory)" />
+    <param name="save_interval_sec" type="double" value="2.0" />
+  </node>
+
+  <group if="$(arg use_bag_clock)">
+    <node
+      pkg="rosbag"
+      type="play"
+      name="bag_player"
+      args="--clock -d $(arg play_delay) -r $(arg play_rate) $(arg bag_path)"
+      output="screen"
+      required="true" />
+  </group>
+
+  <group unless="$(arg use_bag_clock)">
+    <node
+      pkg="rosbag"
+      type="play"
+      name="bag_player"
+      args="-d $(arg play_delay) -r $(arg play_rate) $(arg bag_path)"
+      output="screen"
+      required="true" />
+  </group>
+</launch>

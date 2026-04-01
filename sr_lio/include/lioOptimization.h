@@ -182,10 +182,12 @@ private:
 
     std::vector<std::vector<pcl::PointXYZINormal, Eigen::aligned_allocator<pcl::PointXYZINormal>>>  nearest_points;
 
-	double last_time_lidar;
+    double last_time_lidar;
 	double last_time_imu;
     double last_time_frame;
     double current_time;
+    bool imu_add_gravity_from_orientation;
+    bool estimate_gravity_from_imu;
 
     int index_frame;
 

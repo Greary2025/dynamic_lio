@@ -7,6 +7,7 @@
 #include <iostream>
 #include <string>
 #include <optional>
+#include <set>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -76,12 +77,16 @@ std::queue<nav_msgs::Odometry::ConstPtr> odometryBuf;
 std::queue<sensor_msgs::PointCloud2ConstPtr> fullResBuf;
 std::queue<sensor_msgs::NavSatFix::ConstPtr> gpsBuf;
 std::queue<std::pair<int, int> > scLoopICPBuf;
+std::set<std::pair<int, int> > scLoopPairsPending;
+std::set<std::pair<int, int> > scLoopPairsAccepted;
 
 std::mutex mBuf;
 std::mutex mKF;
 
 double timeLaserOdometry = 0.0;
 double timeLaser = 0.0;
+double loopClosureFrequency = 1.0;
+int latestSCLoopDetectionIdx = -1;
 
 pcl::PointCloud<PointType>::Ptr laserCloudFullRes(new pcl::PointCloud<PointType>());
 pcl::PointCloud<PointType>::Ptr laserCloudMapAfterPGO(new pcl::PointCloud<PointType>());
@@ -124,6 +129,7 @@ bool gpsOffsetInitialized = false;
 double gpsAltitudeInitOffset = 0.0;
 double recentOptimizedX = 0.0;
 double recentOptimizedY = 0.0;
+double lastAftPgoTfPubTime = -1.0;
 
 ros::Publisher pubMapAftPGO, pubOdomAftPGO, pubPathAftPGO;
 ros::Publisher pubLoopScanLocal, pubLoopSubmapLocal;
@@ -323,8 +329,17 @@ void pubPath( void )
         pathAftPGO.poses.push_back(poseStampAftPGO);
     }
     mKF.unlock(); 
+    if (pathAftPGO.poses.empty())
+        return;
+
     pubOdomAftPGO.publish(odomAftPGO); // last pose 
     pubPathAftPGO.publish(pathAftPGO); // poses 
+
+    const ros::Time tf_stamp = ros::Time::now();
+    if (tf_stamp.toSec() <= lastAftPgoTfPubTime)
+        return;
+
+    lastAftPgoTfPubTime = tf_stamp.toSec();
 
     static tf::TransformBroadcaster br;
     tf::Transform transform;
@@ -335,7 +350,7 @@ void pubPath( void )
     q.setY(odomAftPGO.pose.pose.orientation.y);
     q.setZ(odomAftPGO.pose.pose.orientation.z);
     transform.setRotation(q);
-    br.sendTransform(tf::StampedTransform(transform, odomAftPGO.header.stamp, "camera_init", "/aft_pgo"));
+    br.sendTransform(tf::StampedTransform(transform, tf_stamp, "camera_init", "/aft_pgo"));
 } // pubPath
 
 void updatePoses(void)
@@ -489,7 +504,7 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
 
 void process_pg()
 {
-    while(1)
+    while(ros::ok())
     {
 		while ( !odometryBuf.empty() && !fullResBuf.empty() )
         {
@@ -657,15 +672,27 @@ void performSCLoopClosure(void)
     if( int(keyframePoses.size()) < scManager.NUM_EXCLUDE_RECENT) // do not try too early 
         return;
 
+    const int curr_node_idx = keyframePoses.size() - 1; // because cpp starts 0 and ends n-1
+    if (curr_node_idx <= latestSCLoopDetectionIdx)
+        return;
+
+    latestSCLoopDetectionIdx = curr_node_idx;
+
     auto detectResult = scManager.detectLoopClosureID(); // first: nn index, second: yaw diff 
     int SCclosestHistoryFrameID = detectResult.first;
     if( SCclosestHistoryFrameID != -1 ) { 
         const int prev_node_idx = SCclosestHistoryFrameID;
-        const int curr_node_idx = keyframePoses.size() - 1; // because cpp starts 0 and ends n-1
-        cout << "Loop detected! - between " << prev_node_idx << " and " << curr_node_idx << "" << endl;
+        const std::pair<int, int> loop_idx_pair(prev_node_idx, curr_node_idx);
 
         mBuf.lock();
-        scLoopICPBuf.push(std::pair<int, int>(prev_node_idx, curr_node_idx));
+        const bool already_pending = (scLoopPairsPending.find(loop_idx_pair) != scLoopPairsPending.end());
+        const bool already_accepted = (scLoopPairsAccepted.find(loop_idx_pair) != scLoopPairsAccepted.end());
+        if (!already_pending && !already_accepted)
+        {
+            cout << "Loop detected! - between " << prev_node_idx << " and " << curr_node_idx << "" << endl;
+            scLoopPairsPending.insert(loop_idx_pair);
+            scLoopICPBuf.push(loop_idx_pair);
+        }
         // addding actual 6D constraints in the other thread, icp_calculation.
         mBuf.unlock();
     }
@@ -673,7 +700,6 @@ void performSCLoopClosure(void)
 
 void process_lcd(void)
 {
-    float loopClosureFrequency = 1.0; // can change 
     ros::Rate rate(loopClosureFrequency);
     while (ros::ok())
     {
@@ -685,7 +711,7 @@ void process_lcd(void)
 
 void process_icp(void)
 {
-    while(1)
+    while(ros::ok())
     {
 		while ( !scLoopICPBuf.empty() )
         {
@@ -696,6 +722,7 @@ void process_icp(void)
             mBuf.lock(); 
             std::pair<int, int> loop_idx_pair = scLoopICPBuf.front();
             scLoopICPBuf.pop();
+            scLoopPairsPending.erase(loop_idx_pair);
             mBuf.unlock(); 
 
             const int prev_node_idx = loop_idx_pair.first;
@@ -707,6 +734,10 @@ void process_icp(void)
                 gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(prev_node_idx, curr_node_idx, relative_pose, robustLoopNoise));
                 // runISAM2opt();
                 mtxPosegraph.unlock();
+
+                mBuf.lock();
+                scLoopPairsAccepted.insert(loop_idx_pair);
+                mBuf.unlock();
             } 
         }
 
@@ -838,6 +869,7 @@ int main(int argc, char **argv)
 
 	nh.param<double>("sc_dist_thres", scDistThres, 0.2);  
 	nh.param<double>("sc_max_radius", scMaximumRadius, 80.0); // 80 is recommended for outdoor, and lower (ex, 20, 40) values are recommended for indoor 
+    nh.param<double>("loop_closure_frequency", loopClosureFrequency, 1.0);
 
     nh.param<std::string>("output_path", output_path, "");
 
@@ -879,6 +911,13 @@ int main(int argc, char **argv)
 	std::thread viz_path {process_viz_path}; // visualization - path (high frequency)
 
  	ros::spin();
+
+    posegraph_slam.join();
+    lc_detection.join();
+    icp_calculation.join();
+    isam_update.join();
+    viz_map.join();
+    viz_path.join();
 
     recordSinglePose();
 

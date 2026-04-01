@@ -17,7 +17,10 @@ eskfEstimator::eskfEstimator()
     mean_acc = Eigen::Vector3d(0, 0, 9.81);
 
     is_first_imu_meas = true;
+    estimate_gravity_from_imu = true;
     num_init_meas = 1;
+
+    calculateLxly();
 }
 
 void eskfEstimator::setAccCov(double para)
@@ -40,13 +43,29 @@ void eskfEstimator::setBiasGyrCov(double para)
     b_gyr_cov << para, para, para;
 }
 
+void eskfEstimator::setEstimateGravityFromImu(bool enabled)
+{
+    estimate_gravity_from_imu = enabled;
+}
+
 void eskfEstimator::tryInit(const std::vector<std::pair<double, std::pair<Eigen::Vector3d, Eigen::Vector3d>>> &imu_meas)
 {
     initialization(imu_meas);
 
     if (num_init_meas > MIN_INI_COUNT && imu_meas.back().first - time_first_imu > MIN_INI_TIME)
     {
-        acc_cov *= std::pow(G_norm / mean_acc.norm(), 2);
+        const double mean_acc_norm = mean_acc.norm();
+
+        if (estimate_gravity_from_imu)
+        {
+            if (mean_acc_norm < 1e-6)
+            {
+                LOG(ERROR) << "IMU mean acceleration is too small to initialize gravity.";
+                return;
+            }
+
+            acc_cov *= std::pow(G_norm / mean_acc_norm, 2);
+        }
 
         if (gyr_cov.norm() > MAX_GYR_VAR)
         {
@@ -66,20 +85,27 @@ void eskfEstimator::tryInit(const std::vector<std::pair<double, std::pair<Eigen:
         acc_cov = acc_cov_scale;
 
         Eigen::Vector3d init_bg = mean_gyr;
-        Eigen::Vector3d init_gravity = mean_acc / mean_acc.norm() * G_norm;
+        Eigen::Vector3d init_gravity = g;
+
+        if (estimate_gravity_from_imu)
+            init_gravity = mean_acc / mean_acc_norm * G_norm;
     
         setBg(init_bg);
         setGravity(init_gravity);
 
         covariance.block<3, 3>(9, 9) *= 0.001;
         covariance.block<3, 3>(12, 12) *= 0.0001;
-        covariance.block<2, 2>(15, 15) *= 0.00001;
+        if (estimate_gravity_from_imu)
+            covariance.block<2, 2>(15, 15) *= 0.00001;
+        else
+            covariance.block<2, 2>(15, 15) *= 1e-9;
 
         initializeNoise();
 
         ROS_INFO("IMU Initialization Done.");
 
-        std::cout << "init_gravity = " << init_gravity.transpose() << std::endl;
+        std::cout << "init_gravity = " << init_gravity.transpose()
+                  << " (estimate_from_imu=" << (estimate_gravity_from_imu ? "true" : "false") << ")" << std::endl;
         std::cout << "init_bg = " << init_bg.transpose() << std::endl;
     }
     else
@@ -141,7 +167,11 @@ void eskfEstimator::setBa(const Eigen::Vector3d &ba_) { ba = ba_; }
 
 void eskfEstimator::setBg(const Eigen::Vector3d &bg_) { bg = bg_; }
 
-void eskfEstimator::setGravity(const Eigen::Vector3d &g_) { g = g_; }
+void eskfEstimator::setGravity(const Eigen::Vector3d &g_)
+{
+    g = g_;
+    calculateLxly();
+}
 
 Eigen::Vector3d eskfEstimator::getTranslation() { return p; }
 
@@ -154,6 +184,8 @@ Eigen::Vector3d eskfEstimator::getBa() { return ba; }
 Eigen::Vector3d eskfEstimator::getBg() { return bg; }
 
 Eigen::Vector3d eskfEstimator::getGravity() { return g; }
+
+bool eskfEstimator::estimateGravityFromImu() const { return estimate_gravity_from_imu; }
 
 Eigen::Vector3d eskfEstimator::getLastAcc() { return acc_0; }
 
@@ -189,8 +221,6 @@ void eskfEstimator::predict(double dt_, const Eigen::Vector3d &acc_1_, const Eig
     R_omega_x << 0, -un_gyr(2), un_gyr(1), un_gyr(2), 0, -un_gyr(0), -un_gyr(1), un_gyr(0), 0;
     R_acc_x << 0, -un_acc(2), un_acc(1), un_acc(2), 0, -un_acc(0), -un_acc(1), un_acc(0), 0;
 
-    Eigen::Matrix<double, 3, 2> B_x = numType::derivativeS2(g);
-
     Eigen::Matrix<double, 17, 17> F_x = Eigen::MatrixXd::Zero(17, 17);
     F_x.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity();
     F_x.block<3, 3>(0, 6) = Eigen::Matrix3d::Identity() * dt;
@@ -199,10 +229,18 @@ void eskfEstimator::predict(double dt_, const Eigen::Vector3d &acc_1_, const Eig
     F_x.block<3, 3>(6, 3) = - q_before.toRotationMatrix() * R_acc_x * dt;
     F_x.block<3, 3>(6, 6) = Eigen::Matrix3d::Identity();
     F_x.block<3, 3>(6, 9) = - q_before.toRotationMatrix() * dt;
-    F_x.block<3, 2>(6, 15) = numType::skewSymmetric(g) * B_x * dt;
     F_x.block<3, 3>(9, 9) = Eigen::Matrix3d::Identity();
     F_x.block<3, 3>(12, 12) = Eigen::Matrix3d::Identity();
-    F_x.block<2, 2>(15, 15) = - 1.0 / (g.norm() * g.norm()) * B_x.transpose() * numType::skewSymmetric(g) * numType::skewSymmetric(g) * B_x;
+    if (estimate_gravity_from_imu)
+    {
+        Eigen::Matrix<double, 3, 2> B_x = numType::derivativeS2(g);
+        F_x.block<3, 2>(6, 15) = numType::skewSymmetric(g) * B_x * dt;
+        F_x.block<2, 2>(15, 15) = - 1.0 / (g.norm() * g.norm()) * B_x.transpose() * numType::skewSymmetric(g) * numType::skewSymmetric(g) * B_x;
+    }
+    else
+    {
+        F_x.block<2, 2>(15, 15) = Eigen::Matrix2d::Identity();
+    }
 
     Eigen::Matrix<double, 17, 12> F_w = Eigen::MatrixXd::Zero(17, 12);
     F_w.block<3, 3>(6, 0) = - q_before.toRotationMatrix() * dt;
@@ -224,9 +262,13 @@ void eskfEstimator::observe(const Eigen::Matrix<double, 17, 1> &d_x_)
     ba = ba + d_x_.segment<3>(9);
     bg = bg + d_x_.segment<3>(12);
 
-    Eigen::Matrix<double, 3, 2> B_x = numType::derivativeS2(g);
-    Eigen::Vector3d so3_dg = B_x * d_x_.tail<2>();
-    g = numType::so3ToRotation(so3_dg) * g;
+    if (estimate_gravity_from_imu)
+    {
+        Eigen::Matrix<double, 3, 2> B_x = numType::derivativeS2(g);
+        Eigen::Vector3d so3_dg = B_x * d_x_.tail<2>();
+        g = numType::so3ToRotation(so3_dg) * g;
+        calculateLxly();
+    }
 }
 
 void eskfEstimator::observePose(const Eigen::Vector3d &translation, const Eigen::Quaterniond &rotation, double trans_noise, double ang_noise)
@@ -254,6 +296,8 @@ void eskfEstimator::observePose(const Eigen::Vector3d &translation, const Eigen:
     Eigen::Matrix<double, 17, 1> predict_vec = Eigen::Matrix<double, 17, 1>::Zero();
 
     delta_state = predict_vec + K * update_vec;
+    if (!estimate_gravity_from_imu)
+        delta_state.tail<2>().setZero();
     covariance = (Eigen::MatrixXd::Identity(17, 17) - K * H) * covariance;
 
     updateAndReset();
@@ -267,8 +311,15 @@ void eskfEstimator::updateAndReset()
     ba = ba + delta_state.block<3, 1>(9, 0);
     bg = bg + delta_state.block<3, 1>(12, 0);
 
-    g = g + lxly * delta_state.block<2, 1>(15, 0);
-    calculateLxly();
+    if (estimate_gravity_from_imu)
+    {
+        g = g + lxly * delta_state.block<2, 1>(15, 0);
+        calculateLxly();
+    }
+    else
+    {
+        delta_state.block<2, 1>(15, 0).setZero();
+    }
 
     projectCovariance();
     

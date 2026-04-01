@@ -43,6 +43,7 @@ private:
     Eigen::Vector3d mean_gyr, mean_acc;
 
     bool is_first_imu_meas;
+    bool estimate_gravity_from_imu;
     double time_first_imu;
     int num_init_meas;
 
@@ -68,6 +69,8 @@ public:
     void setBiasAccCov(double para);
 
     void setBiasGyrCov(double para);
+
+    void setEstimateGravityFromImu(bool enabled);
 
     void initializeImuData(const Eigen::Vector3d &acc_0_, const Eigen::Vector3d &gyr_0_);
 
@@ -98,6 +101,8 @@ public:
     Eigen::Vector3d getBg();
 
     Eigen::Vector3d getGravity();
+
+    bool estimateGravityFromImu() const;
 
     Eigen::Vector3d getLastAcc();
 

@@ -75,3 +75,12 @@ add_executable(lio_optimization
 		src/utility.cpp
 		src/parameters.cpp)
 target_link_libraries(lio_optimization ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${CERES_LIBRARIES} ${OpenCV_LIBRARIES} robin_map)
+
+add_executable(dynamic_result_saver
+  src/dynamicResultSaver.cpp)
+target_link_libraries(dynamic_result_saver ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+
+catkin_install_python(PROGRAMS
+  scripts/monotonic_time_republisher.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)

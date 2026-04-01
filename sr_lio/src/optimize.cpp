@@ -139,6 +139,7 @@ optimizeSummary lioOptimization::updateIEKF(const icpOptions &cur_icp_options, v
     Eigen::Vector3d ba_predict = eskf_pro->getBa();
     Eigen::Vector3d bg_predict = eskf_pro->getBg();
     Eigen::Vector3d g_predict = eskf_pro->getGravity();
+    const bool estimate_gravity_from_imu = eskf_pro->estimateGravityFromImu();
 
     optimizeSummary summary;
 
@@ -174,31 +175,38 @@ optimizeSummary lioOptimization::updateIEKF(const icpOptions &cur_icp_options, v
         Eigen::Vector3d d_ba = eskf_pro->getBa() - ba_predict;
         Eigen::Vector3d d_bg = eskf_pro->getBg() - bg_predict;
 
-        Eigen::Vector3d g = eskf_pro->getGravity();
+        Eigen::Vector2d d_g = Eigen::Vector2d::Zero();
+        Eigen::Matrix2d J_k_s2 = Eigen::Matrix2d::Identity();
 
-        Eigen::Vector3d g_predict_normalize = g_predict;
-        Eigen::Vector3d g_normalize = g;
-
-        g_predict_normalize.normalize();
-        g_normalize.normalize();
-
-        Eigen::Vector3d cross = g_predict_normalize.cross(g_normalize);
-        double dot = g_predict_normalize.dot(g_normalize);
-
-        Eigen::Matrix3d R_dg;
-
-        if (fabs(1.0 - dot) < 1e-6)
-            R_dg = Eigen::Matrix3d::Identity();
-        else
+        if (estimate_gravity_from_imu)
         {
-            Eigen::Matrix3d skew = numType::skewSymmetric(cross);
-            R_dg = Eigen::Matrix3d::Identity() + skew + skew * skew * (1.0 - dot) 
-                / (cross(0) * cross(0) + cross(1) * cross(1) + cross(2) * cross(2));
-        }
+            Eigen::Vector3d g = eskf_pro->getGravity();
 
-        Eigen::Vector3d so3_dg = numType::rotationToSo3(R_dg);
-        Eigen::Matrix<double, 3, 2> B_x_predict = numType::derivativeS2(g_predict);
-        Eigen::Vector2d d_g = B_x_predict.transpose() * so3_dg;
+            Eigen::Vector3d g_predict_normalize = g_predict;
+            Eigen::Vector3d g_normalize = g;
+
+            g_predict_normalize.normalize();
+            g_normalize.normalize();
+
+            Eigen::Vector3d cross = g_predict_normalize.cross(g_normalize);
+            double dot = g_predict_normalize.dot(g_normalize);
+
+            Eigen::Matrix3d R_dg;
+
+            if (fabs(1.0 - dot) < 1e-6)
+                R_dg = Eigen::Matrix3d::Identity();
+            else
+            {
+                Eigen::Matrix3d skew = numType::skewSymmetric(cross);
+                R_dg = Eigen::Matrix3d::Identity() + skew + skew * skew * (1.0 - dot) 
+                    / (cross(0) * cross(0) + cross(1) * cross(1) + cross(2) * cross(2));
+            }
+
+            Eigen::Vector3d so3_dg = numType::rotationToSo3(R_dg);
+            Eigen::Matrix<double, 3, 2> B_x_predict = numType::derivativeS2(g_predict);
+            d_g = B_x_predict.transpose() * so3_dg;
+            J_k_s2 = Eigen::Matrix2d::Identity() + 0.5 * B_x_predict.transpose() * numType::skewSymmetric(so3_dg) * B_x_predict;
+        }
 
         Eigen::Matrix<double, 17, 1> d_x;
         d_x.head<3>() = d_p;
@@ -209,7 +217,6 @@ optimizeSummary lioOptimization::updateIEKF(const icpOptions &cur_icp_options, v
         d_x.tail<2>() = d_g;
 
         Eigen::Matrix3d J_k_so3 = Eigen::Matrix3d::Identity() - 0.5 * numType::skewSymmetric(d_so3);
-        Eigen::Matrix2d J_k_s2 = Eigen::Matrix2d::Identity() + 0.5 * B_x_predict.transpose() * numType::skewSymmetric(so3_dg) * B_x_predict;
 
         Eigen::Matrix<double, 17, 1> d_x_new = d_x;
         d_x_new.segment<3>(3) = J_k_so3 * d_so3;
@@ -220,14 +227,20 @@ optimizeSummary lioOptimization::updateIEKF(const icpOptions &cur_icp_options, v
         for (int j = 0; j < covariance.cols(); j++)
             covariance.block<3, 1>(3, j) = J_k_so3 * covariance.block<3, 1>(3, j);
 
-        for (int j = 0; j < covariance.cols(); j++)
-            covariance.block<2, 1>(15, j) = J_k_s2 * covariance.block<2, 1>(15, j);
+        if (estimate_gravity_from_imu)
+        {
+            for (int j = 0; j < covariance.cols(); j++)
+                covariance.block<2, 1>(15, j) = J_k_s2 * covariance.block<2, 1>(15, j);
+        }
 
         for (int j = 0; j < covariance.rows(); j++)
             covariance.block<1, 3>(j, 3) = covariance.block<1, 3>(j, 3) * J_k_so3.transpose();
 
-        for (int j = 0; j < covariance.rows(); j++)
-            covariance.block<1, 2>(j, 15) = covariance.block<1, 2>(j, 15) * J_k_s2.transpose();
+        if (estimate_gravity_from_imu)
+        {
+            for (int j = 0; j < covariance.rows(); j++)
+                covariance.block<1, 2>(j, 15) = covariance.block<1, 2>(j, 15) * J_k_s2.transpose();
+        }
 
         Eigen::Matrix<double, 17, 17> temp = (covariance/laser_point_cov).inverse();
         Eigen::Matrix<double, 6, 6> HTH = H_x.transpose() * H_x;
@@ -271,16 +284,19 @@ optimizeSummary lioOptimization::updateIEKF(const icpOptions &cur_icp_options, v
         {
             Eigen::Matrix<double, 17, 17> covariance_new = covariance;
 
-            Eigen::Matrix<double, 3, 2> B_x_before = numType::derivativeS2(g_before);
-
             J_k_so3 = Eigen::Matrix3d::Identity() - 0.5 * numType::skewSymmetric(d_x.segment<3>(3));
-            J_k_s2 = Eigen::Matrix2d::Identity() + 0.5 * B_x_before.transpose() * numType::skewSymmetric(B_x_before * d_x.tail<2>()) * B_x_before;
 
             for (int j = 0; j < covariance.cols(); j++)
                 covariance_new.block<3, 1>(3, j) = J_k_so3 * covariance.block<3, 1>(3, j);
 
-            for (int j = 0; j < covariance.cols(); j++)
-                covariance_new.block<2, 1>(15, j) = J_k_s2 * covariance.block<2, 1>(15, j);
+            if (estimate_gravity_from_imu)
+            {
+                Eigen::Matrix<double, 3, 2> B_x_before = numType::derivativeS2(g_before);
+                J_k_s2 = Eigen::Matrix2d::Identity() + 0.5 * B_x_before.transpose() * numType::skewSymmetric(B_x_before * d_x.tail<2>()) * B_x_before;
+
+                for (int j = 0; j < covariance.cols(); j++)
+                    covariance_new.block<2, 1>(15, j) = J_k_s2 * covariance.block<2, 1>(15, j);
+            }
 
             for (int j = 0; j < covariance.rows(); j++)
             {
@@ -288,17 +304,23 @@ optimizeSummary lioOptimization::updateIEKF(const icpOptions &cur_icp_options, v
                 covariance.block<1, 3>(j, 3) = covariance.block<1, 3>(j, 3) * J_k_so3.transpose();
             }
 
-            for (int j = 0; j < covariance.rows(); j++)
+            if (estimate_gravity_from_imu)
             {
-                covariance_new.block<1, 2>(j, 15) = covariance.block<1, 2>(j, 15) * J_k_s2.transpose();
-                covariance.block<1, 2>(j, 15) = covariance.block<1, 2>(j, 15) * J_k_s2.transpose();
+                for (int j = 0; j < covariance.rows(); j++)
+                {
+                    covariance_new.block<1, 2>(j, 15) = covariance.block<1, 2>(j, 15) * J_k_s2.transpose();
+                    covariance.block<1, 2>(j, 15) = covariance.block<1, 2>(j, 15) * J_k_s2.transpose();
+                }
             }
 
             for (int j = 0; j < 6; j++)
                 K_x.block<3, 1>(3, j) = J_k_so3 * K_x.block<3, 1>(3, j);
 
-            for (int j = 0; j < 6; j++)
-                K_x.block<2, 1>(15, j) = J_k_s2 * K_x.block<2, 1>(15, j);
+            if (estimate_gravity_from_imu)
+            {
+                for (int j = 0; j < 6; j++)
+                    K_x.block<2, 1>(15, j) = J_k_s2 * K_x.block<2, 1>(15, j);
+            }
 
             covariance = covariance_new - K_x.block<17, 6>(0, 0) * covariance.block<6, 17>(0, 0);
 

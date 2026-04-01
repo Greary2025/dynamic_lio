@@ -1,6 +1,22 @@
 #include "cloudProcessing.h"
 #include "utility.h"
 
+namespace
+{
+bool hasPointField(const sensor_msgs::PointCloud2::ConstPtr &msg, const std::string &field_name)
+{
+    for (const auto &field : msg->fields)
+    {
+        if (field.name == field_name)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+}
+
 class PlaneFactor:public ceres::SizedCostFunction<1, 4> 
 {
 public:
@@ -385,9 +401,37 @@ void cloudProcessing::ousterHandler(const sensor_msgs::PointCloud2::ConstPtr &ms
 
 void cloudProcessing::velodyneHandler(const sensor_msgs::PointCloud2::ConstPtr &msg, double &dt_offset)
 {
-	pcl::PointCloud<velodyne_ros::Point> raw_cloud;
-     pcl::fromROSMsg(*msg, raw_cloud);
-     int size = raw_cloud.points.size();
+     const bool has_time_field = hasPointField(msg, "time");
+     const bool has_ring_field = hasPointField(msg, "ring");
+
+     std::vector<velodyne_ros::Point> raw_points;
+
+     if (has_time_field && has_ring_field)
+     {
+          pcl::PointCloud<velodyne_ros::Point> raw_cloud;
+          pcl::fromROSMsg(*msg, raw_cloud);
+          raw_points.assign(raw_cloud.points.begin(), raw_cloud.points.end());
+     }
+     else
+     {
+          pcl::PointCloud<pcl::PointXYZI> raw_cloud_xyzi;
+          pcl::fromROSMsg(*msg, raw_cloud_xyzi);
+          raw_points.resize(raw_cloud_xyzi.points.size());
+
+          for (size_t i = 0; i < raw_cloud_xyzi.points.size(); ++i)
+          {
+               raw_points[i].x = raw_cloud_xyzi.points[i].x;
+               raw_points[i].y = raw_cloud_xyzi.points[i].y;
+               raw_points[i].z = raw_cloud_xyzi.points[i].z;
+               raw_points[i].intensity = raw_cloud_xyzi.points[i].intensity;
+               raw_points[i].time = 0.0f;
+               raw_points[i].ring = 0;
+          }
+
+          ROS_WARN_STREAM_ONCE("Velodyne cloud is missing 'time' and/or 'ring'; estimating them from scan geometry.");
+     }
+
+     int size = raw_points.size();
 
      double dt_last_point;
 
@@ -397,21 +441,21 @@ void cloudProcessing::velodyneHandler(const sensor_msgs::PointCloud2::ConstPtr &
           return;
      }
 
-     if (raw_cloud.points[size - 1].time > 0)
+     if (has_time_field && raw_points[size - 1].time > 0)
      	given_offset_time = true;
      else
           given_offset_time = false;
 
-     if (raw_cloud.points[size - 1].ring > 0)
+     if (has_ring_field && raw_points[size - 1].ring > 0)
           given_ring = true;
      else
           given_ring = false;
 
      if(given_offset_time)
      {
-          sort(raw_cloud.points.begin(), raw_cloud.points.end(), time_list_velodyne);
+          sort(raw_points.begin(), raw_points.end(), time_list_velodyne);
 
-          dt_last_point = raw_cloud.points.back().time * time_unit_scale;
+          dt_last_point = raw_points.back().time * time_unit_scale;
           delta_cut_time = dt_last_point;
      }
 
@@ -430,21 +474,21 @@ void cloudProcessing::velodyneHandler(const sensor_msgs::PointCloud2::ConstPtr &
 
      for (int i = 0; i < size; i++)
      {
-          if (std::isnan(raw_cloud.points[i].x) || std::isnan(raw_cloud.points[i].y) || std::isnan(raw_cloud.points[i].z))
+          if (std::isnan(raw_points[i].x) || std::isnan(raw_points[i].y) || std::isnan(raw_points[i].z))
                continue;
 
           point3D point_temp;
 
-          point_temp.raw_point = Eigen::Vector3d(raw_cloud.points[i].x, raw_cloud.points[i].y, raw_cloud.points[i].z);
+          point_temp.raw_point = Eigen::Vector3d(raw_points[i].x, raw_points[i].y, raw_points[i].z);
           point_temp.point = point_temp.raw_point;
-          point_temp.relative_time = raw_cloud.points[i].time * time_unit_scale;
+          point_temp.relative_time = raw_points[i].time * time_unit_scale;
 
           int row_id, col_id;
           double vertical_angle, horizon_angle, yaw_angle, range;
 
           if (given_ring)
           {
-               row_id = raw_cloud.points[i].ring;
+               row_id = raw_points[i].ring;
                assert(row_id >= 0 && row_id < N_SCANS);
           }
           else
