@@ -3,11 +3,12 @@
   <arg name="play_rate" default="1.0" />
   <arg name="play_delay" default="2.0" />
   <arg name="run_frontend" default="true" />
-  <arg name="run_backend" default="false" />
+  <arg name="run_backend" default="true" />
   <arg name="use_monotonic_time" default="true" />
   <arg name="use_bag_clock" default="false" />
   <arg name="front_rviz" default="true" />
   <arg name="pgo_rviz" default="true" />
+  <arg name="frontend_compare_mode" default="true" />
   <arg name="loop_closure_frequency" default="1.0" />
   <arg name="lidar_input_topic" default="/gensui/lidar" />
   <arg name="imu_input_topic" default="/gensui/imu" />
@@ -16,6 +17,8 @@
   <arg name="output_path" default="/mnt/d/rosbag_evo/0331single/dynamic/gensui" />
   <arg name="pgo_save_directory" default="/mnt/d/rosbag_evo/0331single/dynamic/gensui/" />
   <arg name="result_save_directory" default="/mnt/d/rosbag_evo/0331single/dynamic/gensui" />
+  <arg name="save_scan_pcd_sequence" default="false" />
+  <arg name="save_map_pcds" default="false" />
 
   <param name="/use_sim_time" value="$(arg use_bag_clock)" />
 
@@ -60,6 +63,7 @@
     <param name="loop_closure_frequency" type="double" value="$(arg loop_closure_frequency)" />
     <param name="lidar_type" type="string" value="VLP16" />
     <param name="save_directory" type="string" value="$(arg pgo_save_directory)" />
+    <param name="save_scan_pcd_sequence" type="bool" value="$(arg save_scan_pcd_sequence)" />
     <param name="output_path" type="string" value="$(arg output_path)" />
 
     <remap from="/aft_mapped_to_init" to="/Odometry_after_opt" />
@@ -75,6 +79,10 @@
 
   <node pkg="sr_lio" type="dynamic_result_saver" name="dynamic_result_saver" output="screen">
     <param name="output_dir" type="string" value="$(arg result_save_directory)" />
+    <param
+      name="save_map_pcds"
+      type="bool"
+      value="$(eval 'true' if str(arg('frontend_compare_mode')).lower() == 'true' and str(arg('run_backend')).lower() == 'false' else str(arg('save_map_pcds')).lower())" />
     <param name="save_interval_sec" type="double" value="2.0" />
   </node>
 

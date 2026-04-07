@@ -8,6 +8,7 @@
 #include <string>
 #include <optional>
 #include <set>
+#include <filesystem>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -140,6 +141,7 @@ std::string output_path;
 std::string pgKITTIformat, pgScansDirectory;
 std::string odomKITTIformat;
 std::fstream pgTimeSaveStream;
+bool save_scan_pcd_sequence = false;
 
 std::string padZeros(int val, int num_digits = 6) {
   std::ostringstream out;
@@ -653,7 +655,8 @@ void process_pg()
 
             // save utility 
             std::string curr_node_idx_str = padZeros(curr_node_idx);
-            pcl::io::savePCDFileBinary(pgScansDirectory + curr_node_idx_str + ".pcd", *thisKeyFrame); // scan 
+            if (save_scan_pcd_sequence)
+                pcl::io::savePCDFileBinary(pgScansDirectory + curr_node_idx_str + ".pcd", *thisKeyFrame); // scan
             pgTimeSaveStream << timeLaser << std::endl; // path 
         }
 
@@ -854,14 +857,23 @@ int main(int argc, char **argv)
 	ros::init(argc, argv, "laserPGO");
 	ros::NodeHandle nh;
 
-	nh.param<std::string>("save_directory", save_directory, "/"); // pose assignment every k m move 
+	nh.param<std::string>("save_directory", save_directory, "/"); // pose assignment every k m move
+    nh.param<std::string>("output_path", output_path, "");
+    nh.param<bool>("save_scan_pcd_sequence", save_scan_pcd_sequence, false);
+    if (!save_directory.empty())
+        std::filesystem::create_directories(save_directory);
+    if (!output_path.empty())
+        std::filesystem::create_directories(output_path);
     pgKITTIformat = save_directory + "optimized_poses.txt";
     odomKITTIformat = save_directory + "odom_poses.txt";
-    pgTimeSaveStream = std::fstream(save_directory + "times.txt", std::fstream::out); 
+    pgTimeSaveStream = std::fstream(save_directory + "times.txt", std::fstream::out);
     pgTimeSaveStream.precision(std::numeric_limits<double>::max_digits10);
     pgScansDirectory = save_directory + "Scans/";
-    auto unused = system((std::string("exec rm -r ") + pgScansDirectory).c_str());
-    unused = system((std::string("mkdir -p ") + pgScansDirectory).c_str());
+    if (save_scan_pcd_sequence)
+    {
+        std::filesystem::remove_all(pgScansDirectory);
+        std::filesystem::create_directories(pgScansDirectory);
+    }
 
 	nh.param<double>("keyframe_meter_gap", keyframeMeterGap, 2.0); // pose assignment every k m move 
 	nh.param<double>("keyframe_deg_gap", keyframeDegGap, 10.0); // pose assignment every k deg rot 
@@ -870,8 +882,6 @@ int main(int argc, char **argv)
 	nh.param<double>("sc_dist_thres", scDistThres, 0.2);  
 	nh.param<double>("sc_max_radius", scMaximumRadius, 80.0); // 80 is recommended for outdoor, and lower (ex, 20, 40) values are recommended for indoor 
     nh.param<double>("loop_closure_frequency", loopClosureFrequency, 1.0);
-
-    nh.param<std::string>("output_path", output_path, "");
 
     ISAM2Params parameters;
     parameters.relinearizeThreshold = 0.01;

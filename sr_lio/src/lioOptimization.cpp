@@ -1,6 +1,7 @@
 #include "lioOptimization.h"
 
 #include <cmath>
+#include <filesystem>
 
 cloudFrame::cloudFrame(std::vector<point3D> &point_frame_, state *p_state_)
 {
@@ -86,6 +87,12 @@ void lioOptimization::readParameters()
     nh.param<std::vector<double>>("common/gravity_acc", v_G, std::vector<double>());
     nh.param<bool>("debug_output", debug_output, false);
     nh.param<std::string>("output_path", output_path, "");
+    if (!output_path.empty())
+    {
+        std::filesystem::create_directories(output_path);
+        if (debug_output)
+            std::filesystem::create_directories(output_path + "/cloud_frame");
+    }
 
     // LiDAR parameter
     nh.param<int>("lidar_parameter/lidar_type", para_int, AVIA);  cloud_pro->setLidarType(para_int);

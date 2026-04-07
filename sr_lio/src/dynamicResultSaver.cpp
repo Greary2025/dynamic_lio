@@ -38,20 +38,25 @@ public:
           frontend_static_map_(new pcl::PointCloud<PointType>()),
           backend_map_(new pcl::PointCloud<PointType>())
     {
-        nh.param<std::string>("output_dir", output_dir_, "/mnt/d/rosbag_evo/0331single/dynamic/xianfeng");
+        nh.param<std::string>("output_dir", output_dir_, "/mnt/d/rosbag_evo/0331single/dynamic/gensui");
         nh.param<double>("save_interval_sec", save_interval_sec_, 2.0);
+        nh.param<bool>("save_map_pcds", save_map_pcds_, false);
 
         std::filesystem::create_directories(output_dir_);
 
         frontend_odom_sub_ = nh.subscribe("/Odometry_after_opt", 2000, &DynamicResultSaver::frontendOdomHandler, this);
-        frontend_raw_map_sub_ = nh.subscribe("/loop_map", 100, &DynamicResultSaver::frontendRawMapHandler, this);
-        frontend_static_map_sub_ = nh.subscribe("/cloud_global_map", 100, &DynamicResultSaver::frontendStaticMapHandler, this);
         backend_path_sub_ = nh.subscribe("/aft_pgo_path", 100, &DynamicResultSaver::backendPathHandler, this);
-        backend_map_sub_ = nh.subscribe("/aft_pgo_map", 10, &DynamicResultSaver::backendMapHandler, this);
+        if (save_map_pcds_)
+        {
+            frontend_raw_map_sub_ = nh.subscribe("/loop_map", 100, &DynamicResultSaver::frontendRawMapHandler, this);
+            frontend_static_map_sub_ = nh.subscribe("/cloud_global_map", 100, &DynamicResultSaver::frontendStaticMapHandler, this);
+            backend_map_sub_ = nh.subscribe("/aft_pgo_map", 10, &DynamicResultSaver::backendMapHandler, this);
+        }
 
         flush_timer_ = nh.createTimer(ros::Duration(save_interval_sec_), &DynamicResultSaver::flushTimerCallback, this);
 
-        ROS_INFO_STREAM("dynamic_result_saver output dir: " << output_dir_);
+        ROS_INFO_STREAM("dynamic_result_saver output dir: " << output_dir_
+                        << ", save_map_pcds: " << (save_map_pcds_ ? "true" : "false"));
     }
 
     ~DynamicResultSaver()
@@ -161,9 +166,9 @@ private:
 
             write_frontend_traj = (force || frontend_traj_dirty_) && !frontend_traj_.empty();
             write_backend_traj = (force || backend_traj_dirty_) && !backend_traj_.empty();
-            write_frontend_raw_map = (force || frontend_raw_map_dirty_) && !frontend_raw_map_->empty();
-            write_frontend_static_map = (force || frontend_static_map_dirty_) && !frontend_static_map_->empty();
-            write_backend_map = (force || backend_map_dirty_) && !backend_map_->empty();
+            write_frontend_raw_map = save_map_pcds_ && (force || frontend_raw_map_dirty_) && !frontend_raw_map_->empty();
+            write_frontend_static_map = save_map_pcds_ && (force || frontend_static_map_dirty_) && !frontend_static_map_->empty();
+            write_backend_map = save_map_pcds_ && (force || backend_map_dirty_) && !backend_map_->empty();
 
             if (write_frontend_traj)
                 frontend_traj_copy = frontend_traj_;
@@ -212,6 +217,7 @@ private:
 
     std::string output_dir_;
     double save_interval_sec_ = 2.0;
+    bool save_map_pcds_ = false;
 
     ros::Subscriber frontend_odom_sub_;
     ros::Subscriber frontend_raw_map_sub_;
